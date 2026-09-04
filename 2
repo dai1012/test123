@@ -1,0 +1,28 @@
+function Invoke-MarionetteScript {
+    param(
+        [System.IO.Stream]$Stream,
+        [string]$Script,
+        [object[]]$Arguments = @()
+    )
+
+    $result =
+        Invoke-MarionetteCommand `
+            -Stream $Stream `
+            -Command "WebDriver:ExecuteScript" `
+            -Parameters @{
+                script = $Script
+                args = $Arguments
+                newSandbox = $true
+                sandbox = "default"
+                line = 0
+                filename = "DataikuAutomation.ps1"
+            }
+
+    # Marionette が { value = ... } 形式で返す場合、
+    # 実際の JavaScript 実行結果のみを返却する。
+    if ($null -ne $result.value) {
+        return $result.value
+    }
+
+    return $result
+}

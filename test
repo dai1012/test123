@@ -1,34 +1,46 @@
 # ------------------------------------
-# Username を入力
+# Marionette Element ID を取得
 # ------------------------------------
-$userText = [string]$DataikuUser
 
-Invoke-MarionetteCommand `
-    -Stream $stream `
-    -Command "WebDriver:ElementSendKeys" `
-    -Parameters @{
-        id    = $userId
-        text  = $userText
-        value = @($userText.ToCharArray() | ForEach-Object { [string]$_ })
-    } |
-    Out-Null
-
-Write-Host "    Username input OK"
+$elementKey =
+    "element-6066-11e4-a52e-4f735466cecf"
 
 
-# ------------------------------------
-# Password を入力
-# ------------------------------------
-$passwordText = [string]$DataikuPassword
+function Get-MarionetteElementId {
 
-Invoke-MarionetteCommand `
-    -Stream $stream `
-    -Command "WebDriver:ElementSendKeys" `
-    -Parameters @{
-        id    = $passwordId
-        text  = $passwordText
-        value = @($passwordText.ToCharArray() | ForEach-Object { [string]$_ })
-    } |
-    Out-Null
+    param(
+        $Element
+    )
 
-Write-Host "    Password input OK"
+    # 直接 Element ID が返る場合
+    if (
+        $null -ne $Element.$elementKey
+    ) {
+        return $Element.$elementKey
+    }
+
+    # value 配下に Element ID が返る場合
+    if (
+        $null -ne $Element.value -and
+        $null -ne $Element.value.$elementKey
+    ) {
+        return $Element.value.$elementKey
+    }
+
+    throw "Element ID を取得できませんでした。"
+}
+
+
+$userId =
+    Get-MarionetteElementId $userElement
+
+$passwordId =
+    Get-MarionetteElementId $passwordElement
+
+$buttonId =
+    Get-MarionetteElementId $loginButton
+
+
+Write-Host "    Username element ID: $userId"
+Write-Host "    Password element ID: $passwordId"
+Write-Host "    Login button element ID: $buttonId"

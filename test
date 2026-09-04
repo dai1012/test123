@@ -1,0 +1,34 @@
+# ------------------------------------
+# Username を入力
+# ------------------------------------
+$userText = [string]$DataikuUser
+
+Invoke-MarionetteCommand `
+    -Stream $stream `
+    -Command "WebDriver:ElementSendKeys" `
+    -Parameters @{
+        id    = $userId
+        text  = $userText
+        value = @($userText.ToCharArray() | ForEach-Object { [string]$_ })
+    } |
+    Out-Null
+
+Write-Host "    Username input OK"
+
+
+# ------------------------------------
+# Password を入力
+# ------------------------------------
+$passwordText = [string]$DataikuPassword
+
+Invoke-MarionetteCommand `
+    -Stream $stream `
+    -Command "WebDriver:ElementSendKeys" `
+    -Parameters @{
+        id    = $passwordId
+        text  = $passwordText
+        value = @($passwordText.ToCharArray() | ForEach-Object { [string]$_ })
+    } |
+    Out-Null
+
+Write-Host "    Password input OK"

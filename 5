@@ -1,0 +1,473 @@
+① PowerShell スクリプトを起動
+        ↓
+② Firefox を Headless モードで起動
+        ↓
+③ Marionette に接続
+        ↓
+④ Dataiku AI Services Usage 画面へアクセス
+        ↓
+⑤ ログイン画面へのリダイレクトを確認
+        ↓
+⑥ ユーザー名・パスワードを入力してログイン
+        ↓
+⑦ AI Services Usage 画面への遷移を確認
+        ↓
+⑧ Usage 画面の読み込み完了を確認
+        ↓
+⑨ ページ全体のサイズ（幅・高さ）を取得
+        ↓
+⑩ ページ全体が表示されるように
+   Firefox のウィンドウサイズを調整
+        ↓
+⑪ Usage 画面のスクリーンショットを取得
+        ↓
+⑫ PNG ファイルとして保存
+        ↓
+⑬ Firefox を終了
+
+
+タスクスケジューラ
+    ↓
+PowerShell
+    ↓
+Firefox Headless
+    ↓
+Marionette
+    ↓
+Dataiku ログイン
+    ↓
+AI Services Usage
+    ↓
+ページ全体をスクリーンショット
+    ↓
+PNG 保存
+
+
+
+
+
+
+
+
+
+
+
+
+
+```powershell
+# ----------------------------------------
+# スクリーンショット取得
+# ----------------------------------------
+
+Write-Host "[9] スクリーンショットを取得します"
+
+
+# ページ全体のサイズを取得します
+$pageSize =
+    Invoke-MarionetteScript `
+        -Stream $stream `
+        -Script @'
+return {
+    width: Math.max(
+        document.body.scrollWidth,
+        document.documentElement.scrollWidth
+    ),
+    height: Math.max(
+        document.body.scrollHeight,
+        document.documentElement.scrollHeight
+    )
+};
+'@
+
+
+Write-Host "    Page width : $($pageSize.width)"
+Write-Host "    Page height: $($pageSize.height)"
+
+
+# ページ全体が表示できるようにウィンドウサイズを変更します
+$windowHeight = [Math]::Min(
+    [int]$pageSize.height + 200,
+    8000
+)
+
+Invoke-MarionetteCommand `
+    -Stream $stream `
+    -Command "WebDriver:SetWindowRect" `
+    -Parameters @{
+        x      = 0
+        y      = 0
+        width  = 1920
+        height = $windowHeight
+    } |
+    Out-Null
+
+
+Start-Sleep -Seconds 2
+
+
+# スクリーンショットを取得します
+$screenshot =
+    Invoke-MarionetteCommand `
+        -Stream $stream `
+        -Command "WebDriver:TakeScreenshot" `
+        -Parameters @{}
+
+
+# Base64 データを PNG ファイルとして保存します
+[System.IO.File]::WriteAllBytes(
+    $ScreenshotPath,
+    [System.Convert]::FromBase64String(
+        $screenshot.value
+    )
+)
+
+
+Write-Host "    スクリーンショット保存完了:"
+Write-Host "    $ScreenshotPath"
+```
+
+你第三张图现在显示到：
+
+```powershell
+Invoke-MarionetteCommand
+    -Stream $stream
+    -Command "WebDriver:SetWindowRect"
+    -Parameters @{
+```
+
+所以**从这里继续接上即可**，不用动你前面的登录部分。
+
+---
+
+### API 代码先放在哪里？
+
+等上面截图确认成功后，在你第二张图的：
+
+```powershell
+Write-Host "Title: $($pageInfo.title)"
+Write-Host "URL: $($pageInfo.url)"
+```
+
+
+```
+
+# ----------------------------------------
+# スクリーンショット取得
+# ----------------------------------------
+
+Write-Host "[9] スクリーンショットを取得します"
+
+
+# ページ表示を 70% に縮小
+Invoke-MarionetteScript `
+    -Stream $stream `
+    -Script @'
+document.body.style.zoom = "70%";
+return document.body.style.zoom;
+'@ |
+Out-Null
+
+
+Write-Host "    Zoom: 70%"
+
+Start-Sleep -Seconds 2
+
+
+# スクリーンショット取得
+$screenshot =
+    Invoke-MarionetteCommand `
+        -Stream $stream `
+        -Command "WebDriver:TakeScreenshot" `
+        -Parameters @{}
+
+
+# Base64 → PNG 保存
+$base64 = $screenshot.value
+
+if ($null -eq $base64) {
+    $base64 = $screenshot
+}
+
+
+[System.IO.File]::WriteAllBytes(
+    $ScreenshotPath,
+    [System.Convert]::FromBase64String(
+        $base64
+    )
+)
+
+
+Write-Host "    スクリーンショット保存完了:"
+Write-Host "    $ScreenshotPath"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+可以，**最适合你现在测试的是 Windows Task Scheduler（タスク スケジューラ）设成“EC2 启动时执行”**，然后 PowerShell 自己把 stdout/stderr 写到日志文件。
+
+你现在的目标可以做成：
+
+```text
+EC2 再起動
+→ Windows 起動
+→ Task Scheduler 自動実行
+→ dataiku_bg.ps1
+→ Firefox Headless + Marionette
+→ Screenshot
+→ log 保存
+```
+
+先把你的 `.ps1` 最外层加一个日志包装。比如脚本最上面：
+
+```powershell
+$LogDir = "C:\dataiku-monitor\logs"
+
+if (-not (Test-Path $LogDir)) {
+    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+}
+
+$LogFile = Join-Path `
+    $LogDir `
+    ("dataiku_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
+
+Start-Transcript `
+    -Path $LogFile `
+    -Append
+
+Write-Host "===== Dataiku Screenshot Start ====="
+Write-Host "Start Time : $(Get-Date)"
+```
+
+然后你现有脚本主体不动。
+
+在整个脚本最末尾，最好放：
+
+```powershell
+Write-Host "End Time   : $(Get-Date)"
+Write-Host "===== Dataiku Screenshot End ====="
+
+Stop-Transcript
+```
+
+不过你脚本现在本身有 `try / catch / finally`，更稳妥的是把 `Stop-Transcript` 放进最外层 `finally`，这样失败也能留下 log。例如：
+
+```powershell
+try {
+
+    # ここに既存処理
+
+}
+catch {
+
+    Write-Host "ERROR:"
+    Write-Host $_.Exception.Message
+
+    throw
+}
+finally {
+
+    Write-Host "End Time : $(Get-Date)"
+
+    try {
+        Stop-Transcript
+    }
+    catch {
+    }
+}
+```
+
+这样会产生：
+
+```text
+C:\dataiku-monitor\logs\
+  dataiku_20260905_081501.log
+  dataiku_20260905_091503.log
+  ...
+```
+
+### Task Scheduler 设置
+
+打开：
+
+```text
+タスク スケジューラ
+```
+
+选择：
+
+```text
+タスクの作成
+```
+
+不要用“基本タスク”，直接用“タスクの作成”。
+
+**全般（General）**：
+
+推荐测试：
+
+```text
+名前：
+Dataiku Usage Screenshot
+
+ユーザーがログオンしているかどうかにかかわらず実行する
+```
+
+这里就是你真正要验证的重点：**无人 RDP 登录情况下执行**。
+
+如果有：
+
+```text
+最上位の特権で実行する
+```
+
+如果你们环境允许，可以勾上，尤其是 Firefox、AWS CLI 或目录权限可能受影响时。
+
+**トリガー（Triggers）**：
+
+新增：
+
+```text
+タスクの開始：
+スタートアップ時
+```
+
+也就是：
+
+> At startup / コンピューターの起動時
+
+我建议再加：
+
+```text
+遅延時間：1分
+```
+
+或者 2 分钟。
+
+因为 EC2 刚启动时，网络、服务、Dataiku 通信环境未必立刻准备好。建议：
+
+```text
+起動後 1～2分遅延
+```
+
+比一开机立刻跑稳很多。
+
+**操作（Actions）**：
+
+Program/script：
+
+```text
+powershell.exe
+```
+
+Arguments：
+
+```text
+-NoProfile -ExecutionPolicy Bypass -File "C:\dataiku-monitor\dataiku_bg.ps1"
+```
+
+Start in：
+
+```text
+C:\dataiku-monitor
+```
+
+这个 **Start in 很重要**。否则脚本里如果有相对路径，例如：
+
+```powershell
+.\dataiku_usage.png
+```
+
+Task Scheduler 运行时工作目录可能变成：
+
+```text
+C:\Windows\System32
+```
+
+导致各种莫名其妙的问题。
+
+所以更推荐你脚本内部全部使用绝对路径。
+
+### 第一次不要马上重启
+
+先在 Task Scheduler 里选中任务：
+
+```text
+右键
+→ 実行
+```
+
+然后确认三个东西：
+
+```text
+1. PNG 有没有生成
+2. log 有没有生成
+3. タスクの最終実行結果
+```
+
+正常成功一般是：
+
+```text
+0x0
+```
+
+然后再测试真正目标：
+
+```text
+EC2 再起動
+↓
+不要 RDP 登录
+↓
+等 3～5 分钟
+↓
+再通过 CyberArk/RDP 登录
+↓
+检查 log 和 screenshot
+```
+
+重点看：
+
+```text
+C:\dataiku-monitor\logs\
+```
+
+如果发现一个：
+
+```text
+dataiku_20260905_XXXXXX.log
+```
+
+并且里面已经走到：
+
+```text
+Firefox Headless
+Marionette 起動確認 OK
+Session 作成完了
+Usage 画面
+Screenshot 保存完了
+```
+
+那你就已经证明：
+
+> **EC2 重启后，不需要有人先 RDP 登录，也可以后台执行。**
+
+我还建议日志里额外写两行，非常有用：
+
+```powershell
+Write-Host "User       : $env:USERNAME"
+Write-Host "Session ID : $((Get-Process -Id $PID).SessionId)"
+```
+

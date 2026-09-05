@@ -1,473 +1,301 @@
-① PowerShell スクリプトを起動
-        ↓
-② Firefox を Headless モードで起動
-        ↓
-③ Marionette に接続
-        ↓
-④ Dataiku AI Services Usage 画面へアクセス
-        ↓
-⑤ ログイン画面へのリダイレクトを確認
-        ↓
-⑥ ユーザー名・パスワードを入力してログイン
-        ↓
-⑦ AI Services Usage 画面への遷移を確認
-        ↓
-⑧ Usage 画面の読み込み完了を確認
-        ↓
-⑨ ページ全体のサイズ（幅・高さ）を取得
-        ↓
-⑩ ページ全体が表示されるように
-   Firefox のウィンドウサイズを調整
-        ↓
-⑪ Usage 画面のスクリーンショットを取得
-        ↓
-⑫ PNG ファイルとして保存
-        ↓
-⑬ Firefox を終了
+对，这个现象基本能定位了：**不是 Marionette 卡住，而是 Firefox 的“已有实例复用”机制在干扰。**
 
-
-タスクスケジューラ
-    ↓
-PowerShell
-    ↓
-Firefox Headless
-    ↓
-Marionette
-    ↓
-Dataiku ログイン
-    ↓
-AI Services Usage
-    ↓
-ページ全体をスクリーンショット
-    ↓
-PNG 保存
-
-
-
-
-
-
-
-
-
-
-
-
+你现在提前打开了另一个 Profile 的普通 Firefox，然后脚本执行：
 
 ```powershell
-# ----------------------------------------
-# スクリーンショット取得
-# ----------------------------------------
-
-Write-Host "[9] スクリーンショットを取得します"
-
-
-# ページ全体のサイズを取得します
-$pageSize =
-    Invoke-MarionetteScript `
-        -Stream $stream `
-        -Script @'
-return {
-    width: Math.max(
-        document.body.scrollWidth,
-        document.documentElement.scrollWidth
-    ),
-    height: Math.max(
-        document.body.scrollHeight,
-        document.documentElement.scrollHeight
+Start-Process `
+    -FilePath $FirefoxPath `
+    -ArgumentList @(
+        "--headless"
     )
-};
-'@
-
-
-Write-Host "    Page width : $($pageSize.width)"
-Write-Host "    Page height: $($pageSize.height)"
-
-
-# ページ全体が表示できるようにウィンドウサイズを変更します
-$windowHeight = [Math]::Min(
-    [int]$pageSize.height + 200,
-    8000
-)
-
-Invoke-MarionetteCommand `
-    -Stream $stream `
-    -Command "WebDriver:SetWindowRect" `
-    -Parameters @{
-        x      = 0
-        y      = 0
-        width  = 1920
-        height = $windowHeight
-    } |
-    Out-Null
-
-
-Start-Sleep -Seconds 2
-
-
-# スクリーンショットを取得します
-$screenshot =
-    Invoke-MarionetteCommand `
-        -Stream $stream `
-        -Command "WebDriver:TakeScreenshot" `
-        -Parameters @{}
-
-
-# Base64 データを PNG ファイルとして保存します
-[System.IO.File]::WriteAllBytes(
-    $ScreenshotPath,
-    [System.Convert]::FromBase64String(
-        $screenshot.value
-    )
-)
-
-
-Write-Host "    スクリーンショット保存完了:"
-Write-Host "    $ScreenshotPath"
 ```
 
-你第三张图现在显示到：
+Firefox 默认会先检查**同一 Windows 用户下是否已经存在 Firefox 实例**。如果有，新的 `firefox.exe` 不一定真的独立启动一个全新的浏览器进程，而可能尝试把启动请求交给已有实例。
+
+这就解释了你现在的现象：
+
+```text
+普通 Firefox 已经打开
+        ↓
+脚本启动 firefox.exe --headless
+        ↓
+Firefox 发现已有实例
+        ↓
+尝试复用/通信
+        ↓
+Headless + Marionette 没有按预期独立启动
+        ↓
+PowerShell 一直等 127.0.0.1:2828
+```
+
+你截图里也正好停在：
+
+```text
+[2] Firefox Headless + Marionette を起動します
+Firefox PID: 1484
+```
+
+后面 Marionette 端口一直没起来。
+
+## 应该怎么改
+
+正式版自动化 Firefox 应该加：
+
+```text
+-no-remote
+```
+
+它的意思就是：
+
+> 不要连接/复用已经运行的 Firefox，给我启动一个独立 Firefox 实例。
+
+如果你自动化还使用专用 Profile，我建议启动代码直接改成这样：
 
 ```powershell
-Invoke-MarionetteCommand
-    -Stream $stream
-    -Command "WebDriver:SetWindowRect"
-    -Parameters @{
+Write-Host "[2] Firefox Headless + Marionette を起動します"
+
+$env:MOZ_MARIONETTE = "1"
+
+$firefoxProcess = Start-Process `
+    -FilePath $FirefoxPath `
+    -ArgumentList @(
+        "--headless",
+        "-no-remote",
+        "-profile",
+        "`"$FirefoxProfilePath`""
+    ) `
+    -PassThru
+
+Write-Host "    Firefox PID: $($firefoxProcess.Id)"
 ```
 
-所以**从这里继续接上即可**，不用动你前面的登录部分。
+假设你前面已经定义：
+
+```powershell
+$FirefoxProfilePath = "C:\Users\xxxxx\AppData\Roaming\Mozilla\Firefox\Profiles\xxxxx.infra_4_tai"
+```
+
+那就可以。
+
+如果你原本启动参数里已经有 Profile，就只需要增加：
+
+```powershell
+"-no-remote",
+```
+
+例如原来：
+
+```powershell
+-ArgumentList @(
+    "--headless",
+    "-profile",
+    "`"$FirefoxProfilePath`""
+)
+```
+
+改成：
+
+```powershell
+-ArgumentList @(
+    "--headless",
+    "-no-remote",
+    "-profile",
+    "`"$FirefoxProfilePath`""
+)
+```
 
 ---
 
-### API 代码先放在哪里？
+### 为什么之前 `Stop-Process firefox` 的时候没发现这个问题
 
-等上面截图确认成功后，在你第二张图的：
+这也正好解释了。
 
-```powershell
-Write-Host "Title: $($pageInfo.title)"
-Write-Host "URL: $($pageInfo.url)"
-```
-
-
-```
-
-# ----------------------------------------
-# スクリーンショット取得
-# ----------------------------------------
-
-Write-Host "[9] スクリーンショットを取得します"
-
-
-# ページ表示を 70% に縮小
-Invoke-MarionetteScript `
-    -Stream $stream `
-    -Script @'
-document.body.style.zoom = "70%";
-return document.body.style.zoom;
-'@ |
-Out-Null
-
-
-Write-Host "    Zoom: 70%"
-
-Start-Sleep -Seconds 2
-
-
-# スクリーンショット取得
-$screenshot =
-    Invoke-MarionetteCommand `
-        -Stream $stream `
-        -Command "WebDriver:TakeScreenshot" `
-        -Parameters @{}
-
-
-# Base64 → PNG 保存
-$base64 = $screenshot.value
-
-if ($null -eq $base64) {
-    $base64 = $screenshot
-}
-
-
-[System.IO.File]::WriteAllBytes(
-    $ScreenshotPath,
-    [System.Convert]::FromBase64String(
-        $base64
-    )
-)
-
-
-Write-Host "    スクリーンショット保存完了:"
-Write-Host "    $ScreenshotPath"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-可以，**最适合你现在测试的是 Windows Task Scheduler（タスク スケジューラ）设成“EC2 启动时执行”**，然后 PowerShell 自己把 stdout/stderr 写到日志文件。
-
-你现在的目标可以做成：
-
-```text
-EC2 再起動
-→ Windows 起動
-→ Task Scheduler 自動実行
-→ dataiku_bg.ps1
-→ Firefox Headless + Marionette
-→ Screenshot
-→ log 保存
-```
-
-先把你的 `.ps1` 最外层加一个日志包装。比如脚本最上面：
+原先脚本开始先：
 
 ```powershell
-$LogDir = "C:\dataiku-monitor\logs"
-
-if (-not (Test-Path $LogDir)) {
-    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
-}
-
-$LogFile = Join-Path `
-    $LogDir `
-    ("dataiku_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
-
-Start-Transcript `
-    -Path $LogFile `
-    -Append
-
-Write-Host "===== Dataiku Screenshot Start ====="
-Write-Host "Start Time : $(Get-Date)"
+Get-Process firefox |
+    Stop-Process -Force
 ```
 
-然后你现有脚本主体不动。
-
-在整个脚本最末尾，最好放：
-
-```powershell
-Write-Host "End Time   : $(Get-Date)"
-Write-Host "===== Dataiku Screenshot End ====="
-
-Stop-Transcript
-```
-
-不过你脚本现在本身有 `try / catch / finally`，更稳妥的是把 `Stop-Transcript` 放进最外层 `finally`，这样失败也能留下 log。例如：
-
-```powershell
-try {
-
-    # ここに既存処理
-
-}
-catch {
-
-    Write-Host "ERROR:"
-    Write-Host $_.Exception.Message
-
-    throw
-}
-finally {
-
-    Write-Host "End Time : $(Get-Date)"
-
-    try {
-        Stop-Transcript
-    }
-    catch {
-    }
-}
-```
-
-这样会产生：
+所以运行脚本时：
 
 ```text
-C:\dataiku-monitor\logs\
-  dataiku_20260905_081501.log
-  dataiku_20260905_091503.log
-  ...
-```
-
-### Task Scheduler 设置
-
-打开：
-
-```text
-タスク スケジューラ
-```
-
-选择：
-
-```text
-タスクの作成
-```
-
-不要用“基本タスク”，直接用“タスクの作成”。
-
-**全般（General）**：
-
-推荐测试：
-
-```text
-名前：
-Dataiku Usage Screenshot
-
-ユーザーがログオンしているかどうかにかかわらず実行する
-```
-
-这里就是你真正要验证的重点：**无人 RDP 登录情况下执行**。
-
-如果有：
-
-```text
-最上位の特権で実行する
-```
-
-如果你们环境允许，可以勾上，尤其是 Firefox、AWS CLI 或目录权限可能受影响时。
-
-**トリガー（Triggers）**：
-
-新增：
-
-```text
-タスクの開始：
-スタートアップ時
-```
-
-也就是：
-
-> At startup / コンピューターの起動時
-
-我建议再加：
-
-```text
-遅延時間：1分
-```
-
-或者 2 分钟。
-
-因为 EC2 刚启动时，网络、服务、Dataiku 通信环境未必立刻准备好。建议：
-
-```text
-起動後 1～2分遅延
-```
-
-比一开机立刻跑稳很多。
-
-**操作（Actions）**：
-
-Program/script：
-
-```text
-powershell.exe
-```
-
-Arguments：
-
-```text
--NoProfile -ExecutionPolicy Bypass -File "C:\dataiku-monitor\dataiku_bg.ps1"
-```
-
-Start in：
-
-```text
-C:\dataiku-monitor
-```
-
-这个 **Start in 很重要**。否则脚本里如果有相对路径，例如：
-
-```powershell
-.\dataiku_usage.png
-```
-
-Task Scheduler 运行时工作目录可能变成：
-
-```text
-C:\Windows\System32
-```
-
-导致各种莫名其妙的问题。
-
-所以更推荐你脚本内部全部使用绝对路径。
-
-### 第一次不要马上重启
-
-先在 Task Scheduler 里选中任务：
-
-```text
-右键
-→ 実行
-```
-
-然后确认三个东西：
-
-```text
-1. PNG 有没有生成
-2. log 有没有生成
-3. タスクの最終実行結果
-```
-
-正常成功一般是：
-
-```text
-0x0
-```
-
-然后再测试真正目标：
-
-```text
-EC2 再起動
+所有 Firefox 被关闭
 ↓
-不要 RDP 登录
+系统里没有已有 Firefox 实例
 ↓
-等 3～5 分钟
+Headless Firefox 正常独立启动
 ↓
-再通过 CyberArk/RDP 登录
-↓
-检查 log 和 screenshot
+Marionette 2828 正常启动
 ```
 
-重点看：
+因此一直没暴露 Firefox 单实例复用的问题。
+
+现在我们为了**不影响其他用户**把：
+
+```powershell
+Stop-Process firefox
+```
+
+删掉以后，就出现了：
 
 ```text
-C:\dataiku-monitor\logs\
+已经有普通 Firefox
++
+自动化 Firefox
 ```
 
-如果发现一个：
+这种真正生产环境会遇到的场景。
+
+所以这次测试非常有价值，正好发现了一个正式化前必须处理的问题。
+
+---
+
+## 最终应该做到这种隔离
+
+理想状态：
 
 ```text
-dataiku_20260905_XXXXXX.log
+普通用户 Firefox
+Profile: default-release
+GUI
+           │
+           │ 完全独立
+           │
+自动化 Firefox
+Profile: infra_4_tai
+Headless
+-no-remote
+Marionette :2828
 ```
 
-并且里面已经走到：
+这样别人可以正常：
+
+```text
+Firefox GUI
+→ Google
+→ Dataiku
+→ 其他网站
+```
+
+同时你的 Task Scheduler：
 
 ```text
 Firefox Headless
-Marionette 起動確認 OK
-Session 作成完了
-Usage 画面
-Screenshot 保存完了
+→ Dataiku Usage
+→ Screenshot
 ```
 
-那你就已经证明：
+两边互不影响。
 
-> **EC2 重启后，不需要有人先 RDP 登录，也可以后台执行。**
+---
 
-我还建议日志里额外写两行，非常有用：
+## 还要注意一个事情：自动化专用 Profile 自己不能同时打开
+
+`-no-remote` 能解决：
+
+> **其他 Profile 已经打开**
+
+但不能解决：
+
+> **同一个 `infra_4_tai` Profile 已经被另一个 Firefox 使用**
+
+例如：
+
+```text
+普通 Firefox
+default-release     ← OK
+
+自动脚本
+infra_4_tai         ← OK
+```
+
+没问题。
+
+但是：
+
+```text
+有人手动打开
+infra_4_tai
+        ↓
+自动脚本又启动
+infra_4_tai
+```
+
+仍然可能报：
+
+```text
+Firefox is already running
+Profile in use
+```
+
+所以最好明确：
+
+> `infra_4_tai` は自動処理専用Profileとし、手動操作では使用しない。
+
+---
+
+## 还有 Marionette 2828
+
+普通 Firefox 一般不会占：
+
+```text
+127.0.0.1:2828
+```
+
+所以普通用户 Firefox 和你自动化 Firefox 同时存在没有问题。
+
+真正有问题的是两个自动化任务同时运行：
+
+```text
+Automation A
+Marionette 2828
+
+Automation B
+Marionette 2828
+          ↑
+          冲突
+```
+
+因此 Task Scheduler 里继续保持：
+
+> **タスクが既に実行中の場合：新しいインスタンスを開始しない**
+
+就很好。
+
+---
+
+### 你现在可以直接做这个验证
+
+先保留左边已经打开的普通 Firefox，不要关闭。
+
+给自动化启动参数加：
 
 ```powershell
-Write-Host "User       : $env:USERNAME"
-Write-Host "Session ID : $((Get-Process -Id $PID).SessionId)"
+"-no-remote",
 ```
 
+然后重新运行 `.ps1`。
+
+预期应该变成：
+
+```text
+普通 Firefox GUI
+→ 继续正常使用
+
+PowerShell
+→ Firefox Headless 独立启动
+→ Marionette 2828 OK
+→ Dataiku 登录
+→ Screenshot
+→ 自动化 Firefox 结束
+
+普通 Firefox GUI
+→ 从头到尾都不会被关闭
+```
+
+**如果这个测试成功，那么“脚本运行时不会影响其他用户正常使用 Firefox”这一点就基本验证出来了。**
+
+会议上这部分也可以很好地说明：
+
+> 他のFirefoxセッションへの影響を避けるため、自動処理では専用Profileと `-no-remote` オプションを使用し、既存のFirefoxとは独立したHeadlessインスタンスとして起動しています。

@@ -1,28 +1,18 @@
-function Invoke-MarionetteScript {
-    param(
-        [System.IO.Stream]$Stream,
-        [string]$Script,
-        [object[]]$Arguments = @()
-    )
+# Firefox原生Zoomを70%に固定
+Invoke-MarionetteCommand `
+    -Stream $stream `
+    -Command "Marionette:SetContext" `
+    -Parameters @{ value = "chrome" } | Out-Null
 
-    $result =
-        Invoke-MarionetteCommand `
-            -Stream $Stream `
-            -Command "WebDriver:ExecuteScript" `
-            -Parameters @{
-                script = $Script
-                args = $Arguments
-                newSandbox = $true
-                sandbox = "default"
-                line = 0
-                filename = "DataikuAutomation.ps1"
-            }
+Invoke-MarionetteCommand `
+    -Stream $stream `
+    -Command "WebDriver:ExecuteScript" `
+    -Parameters @{
+        script = "ZoomManager.zoom = 0.7; return ZoomManager.zoom;"
+        args   = @()
+    } | Out-Null
 
-    # Marionette が { value = ... } 形式で返す場合、
-    # 実際の JavaScript 実行結果のみを返却する。
-    if ($null -ne $result.value) {
-        return $result.value
-    }
-
-    return $result
-}
+Invoke-MarionetteCommand `
+    -Stream $stream `
+    -Command "Marionette:SetContext" `
+    -Parameters @{ value = "content" } | Out-Null

@@ -1,0 +1,45 @@
+try {
+
+    # =========================
+    # 你现在已有的全部处理
+    # =========================
+
+    # Firefox
+    # Marionette
+    # Dataiku Login
+    # Screenshot
+    # S3 Upload
+
+
+    # ★ 全部成功以后
+    aws cloudwatch put-metric-data `
+        --namespace "DataikuScreenshot" `
+        --metric-name "ScreenshotSuccess" `
+        --value 1 `
+        --region ap-northeast-1
+
+}
+catch {
+
+    Write-Host "ERROR: $($_.Exception.Message)"
+
+    # ★ 发生异常
+    aws cloudwatch put-metric-data `
+        --namespace "DataikuScreenshot" `
+        --metric-name "ScreenshotFailure" `
+        --value 1 `
+        --region ap-northeast-1
+
+}
+finally {
+
+    # =========================
+    # 你现在已有的cleanup
+    # =========================
+
+    # DeleteSession
+    # stream.Close()
+    # client.Close()
+    # Firefox结束
+    # Stop-Transcript
+}

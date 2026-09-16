@@ -1,4 +1,0 @@
-BYO LLM（AWS Bedrock）利用時のAI Services Credit消費について、追加で確認させてください。
-
-BedrockのLLM利用料は弊社AWS側で負担している認識ですが、その場合でもAI Services Creditが消費される理由をご教示いただけますでしょうか。
-また、このAI Services Creditは具体的にどの処理・サービスに対して消費されるものなのでしょうか。

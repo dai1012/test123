@@ -1,26 +1,201 @@
+思考了 26s
+
+对，你现在的 `control_table` 设计基本没有问题，而且之前⑤处理条件表中的8种情况，现在已经可以写出对应的SQL判断逻辑了。
+
+我看了你修改后的截图：
+
+* `kubun`：设置为PK，正确。
+
+* `value`：使用 `varchar(256)`，正确。
+
+* `prod_bq_available`：初期值为 `false`，正确。
+
+* `stop_flag`：初期值为 `false`，保持了原来的停止控制逻辑。
+
+* 每个区分保持1条记录，正确。
+
+建议仅在 `value` 的说明栏追加一句：
+
+> 設定値は文字列（'true'、'false'）とし、NULLは不可とする。
+
+这样以后让 GitHub Copilot 开发时，不会把字符串和 Boolean 类型混淆。
+
+### 1\. ⑤处理条件的整体整理
+
+根据你之前发的「移行スケジュール」中的8种处理条件，可以整理为以下内容。
+
+| SEQ | 処理モード | 退会会員対象 | 本番BQ利用可能 | 事前1⑤完了 | 事前2⑤完了 | lp_cc_info 当日④完了 |
+| --- | ----- | ------ | -------- | ------ | ------ | ---------------- |
+| 1   | 事前1   | 対象     | ○        | ―      | ―      | ○                |
+| 2   | 事前1   | 対象外    | ○        | ―      | ―      | ―                |
+| 3   | 事前2   | 対象     | ―        | ○      | ―      | ○                |
+| 4   | 事前2   | 対象外    | ―        | ○      | ―      | ―                |
+| 5   | 当日    | 対象     | ―        | ○      | ○      | ○                |
+| 6   | 当日    | 対象外    | ―        | ○      | ○      | ―                |
+| 7   | 事後    | 対象     | ―        | ―      | ―      | ―                |
+| 8   | 事後    | 対象外    | ―        | ―      | ―      | ―                |
+
+这里的○表示必须满足该条件，―表示原条件表中没有要求判断该条件。
+
+实际上，8种情况只需要组合4种基本判断SQL，不需要分别开发8套完全不同的SQL。
+
+### 2\. 四种基本判断SQL
+
+以下SQL是在 Cloud SQL 的検証情報DB中执行的，不是在 BigQuery 中执行的。
+
+暂时按照以下字段名称编写，最终需要和最新版テーブル設計核对。
+
+| 项目    | 使用值（暂定）          |
+| ----- | ---------------- |
+| 表状态管理 | table_status_mng |
+| ④状态   | status_step_4    |
+| ⑤状态   | status_step_5    |
+| 正常完了  | SUCCESS          |
+| 事前1   | pre1             |
+| 事前2   | pre2             |
+| 当日    | main             |
+| 事后    | post             |
+
+### 条件A：本番BQ利用可能
+
+这就是今天新增的控制条件。
+
+```sql
+SELECT COUNT(*) AS cnt
+FROM control_table
+WHERE kubun = 'prod_bq_available'
+  AND value = 'true';
+```
+
+判定条件：
+
+* `cnt = 1`：利用可能
+
+* `cnt = 0`：条件未成立
+
+### 条件B：同テーブル事前1⑤完了
+
+```sql
+SELECT COUNT(*) AS cnt
+FROM table_status_mng
+WHERE table_id = :table_id
+  AND mode = 'pre1'
+  AND status_step_5 = 'SUCCESS';
+```
+
+`cnt = 1` 时，表示同一张表的事前1⑤处理已完成。
+
+### 条件C：同テーブル事前2⑤完了
+
+```sql
+SELECT COUNT(*) AS cnt
+FROM table_status_mng
+WHERE table_id = :table_id
+  AND mode = 'pre2'
+  AND status_step_5 = 'SUCCESS';
+```
+
+`cnt = 1` 时，表示同一张表的事前2⑤处理已完成。
+
+### 条件D：lp_cc_info当日④完了
+
+```sql
+SELECT COUNT(*) AS cnt
+FROM table_status_mng
+WHERE table_id = 'lp_cc_info'
+  AND mode = 'main'
+  AND status_step_4 = 'SUCCESS';
+```
+
+`cnt = 1` 时，表示退会会员除外处理所需要的 `lp_cc_info` 已经导入当日一时BQ。
+
+### 3\. 8种情况对应的SQL组合
+
+通过上面的4种SQL，就可以实现以下全部条件。
+
+| SEQ | 処理モード | 退会会員対象 | 判定条件          |
+| --- | ----- | ------ | ------------- |
+| 1   | 事前1   | 対象     | A AND D       |
+| 2   | 事前1   | 対象外    | A             |
+| 3   | 事前2   | 対象     | B AND D       |
+| 4   | 事前2   | 対象外    | B             |
+| 5   | 当日    | 対象     | B AND C AND D |
+| 6   | 当日    | 対象外    | B AND C       |
+| 7   | 事後    | 対象     | 無条件           |
+| 8   | 事後    | 対象外    | 無条件           |
+
+例如SEQ 1，可以合成一条SQL：
+
+```sql
+SELECT CASE
+    WHEN EXISTS (
+        SELECT 1
+        FROM control_table
+        WHERE kubun = 'prod_bq_available'
+          AND value = 'true'
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM table_status_mng
+        WHERE table_id = 'lp_cc_info'
+          AND mode = 'main'
+          AND status_step_4 = 'SUCCESS'
+    )
+    THEN 1
+    ELSE 0
+END AS executable;
+```
+
+返回 `1` 就可以通过本次条件判断，返回 `0` 就继续等待。
+
+不过从共通化和今后维护的角度，我更推荐前面的4个SQL分别共通化，然后由Python组合判断。
+
+### 4\. ⑤处理条件判断流程
+
+```mermaid
 flowchart TD
-    subgraph A["移行処理（既存設計）"]
-        VM["GCP VM<br/>移行処理プログラム（Python）"]
-        S3["AWS S3"]
-        GCS["Google Cloud Storage"]
-        BQT["BigQuery 一時テーブル"]
-        BQP["BigQuery 正式テーブル"]
-        VM -.->|移行処理の実行| S3
-        S3 -->|③ ファイル同期| GCS
-        GCS -->|④ BQロード| BQT
-        BQT -->|⑤ 正式TBLロード| BQP
-    end
+    A["⑤正式TBLロード実施判定"] --> B{"停止制御確認"}
+    B -->|新規起動停止| X["新規起動しない"]
+    B -->|新規起動可| C{"対象テーブルの④完了確認"}
+    C -->|未完了| W["実施保留"]
+    C -->|完了| D["処理モード・退会会員対象区分取得"]
+    D --> E["該当する⑤処理条件の判定<br/>SEQ1～8"]
+    E --> F{"全条件成立？"}
+    F -->|No| W
+    F -->|Yes| G["⑤正式TBLロード実行"]
+    W --> H["次回ループ時に再判定"]
+```
 
-    subgraph B["監視処理（想定）"]
-        CS["Cloud Scheduler<br/>定期起動"]
-        CR["Cloud Run<br/>監視処理プログラム"]
-        CS -->|定期実行| CR
-    end
+注意，这里还有两个共通条件：
 
-    DB[("Cloud SQL<br/>検証情報DB")]
+* 停止制御：`stop_flag = 'false'`
 
-    VM -->|処理ステータス・検証結果の更新| DB
-    CR -->|処理ステータス・検証結果の取得| DB
-    CR -->|監視結果・異常ログの出力| CL["Cloud Logging"]
-    CL --> CM["Cloud Monitoring"]
-    CM -->|異常検知・アラート通知| USER["運用担当者"]
+* 当前迁移对象自身的④处理已经完成。
+
+这两个条件即使是事后模式也需要判断。上面SEQ7、8的「無条件」只是指没有额外的依赖条件。
+
+### 5\. 模拟一下实际运行过程
+
+假设 `TABLE_A` 是退会会员对象表。
+
+| 时间       | 本番BQ利用可否 | lp_cc_info 当日④ | TABLE_A 事前1⑤ | TABLE_A 事前2⑤ | 执行结果   |
+| -------- | -------- | -------------- | ------------ | ------------ | ------ |
+| 事前1期间    | false    | 未完了            | 未完了          | 未完了          | 等待     |
+| 事前2期间    | true     | 未完了            | 未完了          | 未完了          | 等待     |
+| 当日 09:00 | true     | SUCCESS        | 未完了          | 未完了          | 执行事前1⑤ |
+| 当日 09:30 | true     | SUCCESS        | SUCCESS      | 未完了          | 执行事前2⑤ |
+| 当日 10:00 | true     | SUCCESS        | SUCCESS      | SUCCESS      | 执行当日⑤  |
+
+这就实现了同事提出的依赖控制。
+
+### 6\. 还有三个地方需要确认
+
+| 確認事項                | 确认原因                                      |
+| ------------------- | ----------------------------------------- |
+| 事前1、事前2的mode定义      | 原来的设计只有事前、当日、事后，需要确认是否已经区分                |
+| 某张表不存在事前1或事前2数据时的判断 | 避免因不存在状态记录而无限等待                           |
+| 本番BQ利用可否是否作为⑤的共通条件  | 原条件表只在SEQ1、2判断，如果之后变回false，是否也应该禁止其他模式执行⑤ |
+
+另外，如果状态管理表保存多次迁移的记录，SQL还需要加入本次迁移的识别条件，避免读取上一次迁移的成功状态。
+
+总体来说，你今天的DB修改是正确的。接下来可以开始修改⑤处理条件判断的设计了。 建议将4种基本SQL定义为共通处理，8种情况通过条件组合实现，这样以后即使客户再次修改迁移条件，也不需要大量修改程序。

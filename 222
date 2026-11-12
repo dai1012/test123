@@ -1,181 +1,116 @@
-思考了 30s
+### ① Parquetファイルと一時BQテーブルの項目数が異なる場合
 
-你现在这张图的修改方向是正确的，原来的两个分支都可以保留，不需要再改变流程结构。
+Parquetファイルとロード先のBigQueryテーブルの項目数が異なる場合でも、条件によってはロード可能です。
 
-不过绿色框中的补充说明建议稍微修改一下。因为技术上确实可以把 `INSERT SELECT` 全部换成 `MERGE`，但不能直接断定所有 MERGE 的性能影响都很大。
+| No. | Parquetファイル | 一時BQテーブル | ロード可否 | 対応方法             |
+| --- | ----------- | -------- | ----- | ---------------- |
+| 1   | a、b、c       | a、b、c    | ○     | 通常のLoad          |
+| 2   | a、b、c、d     | a、b、c    | ○     | 不要項目を除外          |
+| 3   | a、b、c       | a、b、c、d  | ○     | NULLまたはデフォルト値を設定 |
+| 4   | a、b、c       | x、y、z    | ×     | ロード後に項目名を変更      |
+| 5   | a、b、c       | a、b、z    | ×     | ロード後に項目名を変更      |
 
-### 一、绿色补充说明怎么写？
+※同名項目のデータ型に互換性があることを前提とする。
 
-你现在写的是：
+### ② 移行元の項目数が多い場合
 
-> 新規レコードは「select insert」 既存のレコードを更新の場合、「MERGE」 全部「MERGE」にすると、性能影響が大きい
+Parquetファイル
 
-前两句的方向是正确的，最后一句不够严谨。
+| a    | b   | c     | d   |
+| ---- | --- | ----- | --- |
+| A001 | 100 | Tokyo | AAA |
 
-因为 MERGE 有两种使用方式：
+ロード先の一時BQテーブル
 
-| 方式                   | 处理内容         | 正式表主键照合 |
-| -------------------- | ------------ | ------- |
-| INSERT SELECT        | 直接追加         | 不需要     |
-| MERGE（仅INSERT）       | 不存在时追加       | 通常需要    |
-| MERGE（INSERT＋UPDATE） | 存在则更新，不存在则追加 | 需要      |
+| a    | b   | c     |
+| ---- | --- | ----- |
+| A001 | 100 | Tokyo |
 
-特别是包含 UPDATE 的 MERGE，在按需计费方式下，可能产生较大的目标表数据处理量。仅包含 INSERT 的 MERGE 则没有同样的计费规则。Google Cloud Documentation
-
-### 建议将绿色框修改为以下内容
-
-補足説明
-
-・差分追加の場合は「INSERT SELECT」を使用する。
-
-・差分更新の場合は「MERGE」を使用する。
-
-・MERGEによる統一も可能だが、差分追加時には不要な主キー照合が発生する可能性があるため、性能面を考慮し、処理方式を使い分ける。
-
-这样如果同事问为什么不统一 MERGE，你就有明确的理由：对于已经确定只需要追加的数据，没有必要再与正式表进行主键照合。
-
-而不是说 MERGE 本身不能用于追加。
-
-### 二、上面的蓝色框：退会会员除外対象外
-
-这个框中有两种处理：
-
-* 事前1・事前2・事後：COPY
-
-* 当日：`update_tbl_flg` 对象使用 MERGE，否则使用 COPY
-
-蓝色框保持现在的内容即可，只需要在下面补充命令及 SQL 示例。
-
-### ① COPY 命令例
+`ignore_unknown_values=true` を指定することで、ロード先テーブルに存在しない項目（d）を無視してロードできる。
 
 ```bash
-bq cp -a \
+bq load \
+  --source_format=PARQUET \
+  --ignore_unknown_values=true \
   project:tmp.table_A \
-  project:prod.table_A
+  'gs://bucket/table_A/*.parquet'
 ```
 
-`-a` 表示追加，不覆盖正式表原有数据。Google Cloud Documentation
+不要項目をロード後に削除する必要はない。
 
-### ② MERGE SQL 例
+### ③ 移行先の項目数が多い場合
+
+Parquetファイル
+
+| a    | b   | c     |
+| ---- | --- | ----- |
+| A001 | 100 | Tokyo |
+
+ロード先の一時BQテーブル
+
+| a    | b   | c     | d    |
+| ---- | --- | ----- | ---- |
+| A001 | 100 | Tokyo | NULL |
+
+移行元に存在しない項目については、NULLまたはデフォルト値が設定される。
+
+ただし、必須項目（REQUIRED）であり、デフォルト値も設定されていない場合はロードできない。
+
+### ④ 項目名が異なる場合
+
+Parquetファイル
+
+| a    | b   | c     |
+| ---- | --- | ----- |
+| A001 | 100 | Tokyo |
+
+ロード先の一時BQテーブル（期待結果）
+
+| x    | y   | z     |
+| ---- | --- | ----- |
+| A001 | 100 | Tokyo |
+
+Load Jobでは、以下のような項目名のマッピングを指定することはできない。
+
+```text
+a → x
+b → y
+c → z
+```
+
+項目名の変更のみであれば、全ファイルのロード完了後に `ALTER TABLE RENAME COLUMN` を実行することで対応可能。
 
 ```sql
-MERGE `project.prod.table_A` AS T
-USING `project.tmp.table_A` AS S
-ON T.id = S.id
-
-WHEN MATCHED THEN
-  UPDATE SET
-    amount = S.amount
-
-WHEN NOT MATCHED THEN
-  INSERT (id, member_id, amount)
-  VALUES (S.id, S.member_id, S.amount);
+ALTER TABLE `project.tmp.table_A`
+  RENAME COLUMN a TO x,
+  RENAME COLUMN b TO y,
+  RENAME COLUMN c TO z;
 ```
 
-这里是普通 MERGE，没有退会会员除外处理。
+※分割ロードを実施する場合、全Load Jobの完了後に項目名を変更する必要がある。
 
-### 三、下面的蓝色框：退会会员除外対象
+### ⑤ レイアウト変更内容ごとの対応方法
 
-这里同样保留原有分支，只补充两种 SQL。
+| レイアウト変更内容 | 対応方法                       | ロード後の加工 |
+| --------- | -------------------------- | ------- |
+| レイアウト変更なし | 通常のLoad                    | 不要      |
+| 不要項目の削除   | ignore_unknown_values=true | 不要      |
+| NULL項目の追加 | ロード先のSchema定義              | 不要      |
+| 固定値項目の追加  | DEFAULT値の設定                | 不要      |
+| 項目名の変更    | ALTER TABLE RENAME COLUMN  | 必要      |
+| 項目型の変更    | ALTER TABLEまたはCAST等        | 変更内容による |
+| 項目値の加工    | SQLによる変換処理                 | 必要      |
 
-### ① INSERT SELECT SQL 例
+### ⑥ 対応方針
 
-```sql
-INSERT INTO `project.prod.table_A`
-  (id, member_id, amount)
+一時BQテーブルは、原則として正式BQテーブルと同一のレイアウトとする。
 
-SELECT
-  S.id,
-  S.member_id,
-  S.amount
-FROM `project.tmp.table_A` AS S
+Load Jobで対応可能なレイアウト差異については、ロード先のSchema定義およびLoad Jobのオプションにより対応する。
 
-WHERE NOT EXISTS (
-  SELECT 1
-  FROM `project.tmp_day.lp_cc_info` AS L
-  WHERE S.member_id = L.member_id
-    AND L.cc_status IN ('1', '3', '4')
-);
-```
+Load Jobで対応できない項目名変更等については、全ファイルのロード完了後に必要な変更処理を実施する。
 
-这个 SQL 只是将退会会员排除，然后把剩余数据追加到正式表。
+レイアウト変更対象外のテーブルについては、既存のロード処理を変更しない。
 
-### ② MERGE SQL 例
+※実際のレイアウト変更内容を確認した上で、対応方法を決定する。また、実際のParquetファイルを使用した動作検証が必要となる。
 
-```sql
-MERGE `project.prod.table_A` AS T
-
-USING (
-  SELECT S.*
-  FROM `project.tmp.table_A` AS S
-  WHERE NOT EXISTS (
-    SELECT 1
-    FROM `project.tmp_day.lp_cc_info` AS L
-    WHERE S.member_id = L.member_id
-      AND L.cc_status IN ('1', '3', '4')
-  )
-) AS S
-
-ON T.id = S.id
-
-WHEN MATCHED THEN
-  UPDATE SET
-    amount = S.amount
-
-WHEN NOT MATCHED THEN
-  INSERT (id, member_id, amount)
-  VALUES (S.id, S.member_id, S.amount);
-```
-
-与上面的普通 MERGE 相比，唯一的主要区别就是 USING 中增加了退会会员除外条件。
-
-BigQuery 的 MERGE 支持在 USING 中指定子查询，所以这种写法是正确的。Google Cloud Documentation
-
-你之前删除的 SQL 完整内容在这张截图中已经看不到了，因此不能认定之前的 SQL 有错。如果之前也是在 USING 中进行退会会员除外，那么原来的写法就可以继续使用。
-
-### 四、为什么不全部使用 MERGE？用简单例子说明
-
-假设正式 BQ 有1TB数据，本次需要追加10GB。
-
-INSERT SELECT
-
-一时BQ：10GB
-
-退会会员除外
-
-正式BQ：1TB ＋ 本次有效数据
-
-不需要与正式表进行主键匹配。
-
-MERGE（按主键匹配）
-
-一时BQ：10GB
-
-正式BQ：1TB
-
-主キー照合（JOIN）
-
-INSERT／UPDATE
-
-需要根据匹配条件判断正式表中是否已有对应数据。
-
-对于你的项目，很多表都是差分追加，因此保留 INSERT SELECT 有合理的性能依据。
-
-另外，如果全部改成按主键匹配的 MERGE，遇到既存主键时可能会跳过或更新数据，这也会影响原来的件数及合计值检证公式。
-
-### 五、最终需要修改的地方
-
-| 位置       | 修改内容                       |
-| -------- | -------------------------- |
-| 上方蓝色框    | 不修改                        |
-| 下方蓝色框    | 不修改                        |
-| 右侧検証情報登録 | 不修改                        |
-| 绿色补充说明   | 修改最后一句性能说明                 |
-| 上方SQL示例  | 补充 COPY、普通 MERGE           |
-| 下方SQL示例  | 补充退会除外 INSERT SELECT、MERGE |
-
-注意，以上 SQL 中的 `id`、`member_id`、`amount` 都是说明用的示例字段。实际开发时使用你们已经定义好的主键、项目列表和 `quit_where` 条件即可，不需要重新定义退会会员判定规则。
-
-本次没有必要新增处理框，也没有必要改变原来的反映方式。 只需要把补充说明写准确，并恢复正确的 SQL 示例即可。
-
-官方参考：[BigQuery INSERT／MERGE DML语法及资源计算规则](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/dml-syntax?utm_source=chatgpt.com)
+参考：[Google Cloud公式ドキュメント：Parquetデータの読み込み](https://cloud.google.com/bigquery/docs/loading-data-cloud-storage-parquet?hl=ja&utm_source=chatgpt.com)

@@ -1,0 +1,26 @@
+flowchart TD
+    subgraph A["移行処理（既存設計）"]
+        VM["GCP VM<br/>移行処理プログラム（Python）"]
+        S3["AWS S3"]
+        GCS["Google Cloud Storage"]
+        BQT["BigQuery 一時テーブル"]
+        BQP["BigQuery 正式テーブル"]
+        VM -.->|移行処理の実行| S3
+        S3 -->|③ ファイル同期| GCS
+        GCS -->|④ BQロード| BQT
+        BQT -->|⑤ 正式TBLロード| BQP
+    end
+
+    subgraph B["監視処理（想定）"]
+        CS["Cloud Scheduler<br/>定期起動"]
+        CR["Cloud Run<br/>監視処理プログラム"]
+        CS -->|定期実行| CR
+    end
+
+    DB[("Cloud SQL<br/>検証情報DB")]
+
+    VM -->|処理ステータス・検証結果の更新| DB
+    CR -->|処理ステータス・検証結果の取得| DB
+    CR -->|監視結果・異常ログの出力| CL["Cloud Logging"]
+    CL --> CM["Cloud Monitoring"]
+    CM -->|異常検知・アラート通知| USER["運用担当者"]

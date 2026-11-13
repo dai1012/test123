@@ -1,201 +1,188 @@
-思考了 26s
+这次我建议把**方式③：事前建表＋Parquet Load＋UPDATE**作为Hash88生成的优先方案，反映到现有设计资料中。
 
-对，你现在的 `control_table` 设计基本没有问题，而且之前⑤处理条件表中的8种情况，现在已经可以写出对应的SQL判断逻辑了。
+它是之前「ALTER TABLE＋UPDATE」方式的改善版。既然已经提前创建一时表，就可以直接UPDATE，不需要再追加列，也不需要额外的加工表。
 
-我看了你修改后的截图：
+## **一、设计资料需要修改的地方**
 
-* `kubun`：设置为PK，正确。
+| Sheet         | 修改内容                   |
+| ------------- | ---------------------- |
+| 事前準備          | 提前创建包含Hash88项目的一时BQ表   |
+| ④ parquet読み込み | Load方式及Hash88生成处理      |
+| テーブル設計        | Hash88生成对象Flag及必要的状态管理 |
+| チェック事項一覧      | Hash88生成、格式异常等检证       |
+| ⑤ 正式TBLロード    | 原则上不需要修改Hash88相关处理     |
 
-* `value`：使用 `varchar(256)`，正确。
+### **1. 事前準備**
 
-* `prod_bq_available`：初期值为 `false`，正确。
+建议追加以下日语说明：
 
-* `stop_flag`：初期值为 `false`，保持了原来的停止控制逻辑。
+■ 一時BQテーブルの事前作成
 
-* 每个区分保持1条记录，正确。
+正式BQテーブルの定義情報をもとに、一時BQテーブルを事前に作成する。
 
-建议仅在 `value` 的说明栏追加一句：
+cc_id_hashed_88生成対象テーブルについては、cc_id_hashed_88カラム（STRING、NULLABLE）を含めて作成する。
 
-> 設定値は文字列（'true'、'false'）とし、NULLは不可とする。
+カラム名、データ型、カラム順序等は正式BQテーブルの定義に合わせる。
 
-这样以后让 GitHub Copilot 开发时，不会把字符串和 Boolean 类型混淆。
+这里的前提是正式表的Hash88项目也允许NULL，或者已经明确一时表与正式表的NULL约束差异如何处理。
 
-### 1\. ⑤处理条件的整体整理
+### **2. ④ Parquetロード处理**
 
-根据你之前发的「移行スケジュール」中的8种处理条件，可以整理为以下内容。
+Load Job使用以下设置：
 
-| SEQ | 処理モード | 退会会員対象 | 本番BQ利用可能 | 事前1⑤完了 | 事前2⑤完了 | lp_cc_info 当日④完了 |
-| --- | ----- | ------ | -------- | ------ | ------ | ---------------- |
-| 1   | 事前1   | 対象     | ○        | ―      | ―      | ○                |
-| 2   | 事前1   | 対象外    | ○        | ―      | ―      | ―                |
-| 3   | 事前2   | 対象     | ―        | ○      | ―      | ○                |
-| 4   | 事前2   | 対象外    | ―        | ○      | ―      | ―                |
-| 5   | 当日    | 対象     | ―        | ○      | ○      | ○                |
-| 6   | 当日    | 対象外    | ―        | ○      | ○      | ―                |
-| 7   | 事後    | 対象     | ―        | ―      | ―      | ―                |
-| 8   | 事後    | 対象外    | ―        | ―      | ―      | ―                |
+| パラメータ              | 設定値          |
+| ------------------ | ------------ |
+| source_format      | PARQUET      |
+| create_disposition | CREATE_NEVER |
+| write_disposition  | WRITE_APPEND |
 
-这里的○表示必须满足该条件，―表示原条件表中没有要求判断该条件。
+`CREATE_NEVER`表示必须使用事前创建的一时表，`WRITE_APPEND`表示保留事前定义的表结构并追加数据。
 
-实际上，8种情况只需要组合4种基本判断SQL，不需要分别开发8套完全不同的SQL。
+### **3. ④ Hash88生成处理**
 
-### 2\. 四种基本判断SQL
+你之前截图中红色部分，我建议直接修改成下面这样。
 
-以下SQL是在 Cloud SQL 的検証情報DB中执行的，不是在 BigQuery 中执行的。
+**■ cc_id_hashed_88生成処理**
 
-暂时按照以下字段名称编写，最终需要和最新版テーブル設計核对。
+・hash_tbl_flg = '1' のテーブルを対象とする。
 
-| 项目    | 使用值（暂定）          |
-| ----- | ---------------- |
-| 表状态管理 | table_status_mng |
-| ④状态   | status_step_4    |
-| ⑤状态   | status_step_5    |
-| 正常完了  | SUCCESS          |
-| 事前1   | pre1             |
-| 事前2   | pre2             |
-| 当日    | main             |
-| 事后    | post             |
+・一時BQテーブルには、事前準備にてcc_id_hashed_88カラムを作成しておく。
 
-### 条件A：本番BQ利用可能
+・全Parquetファイルのロード及び件数検証が正常終了した後、以下のSQLを実行し、cc_id_hashed_88の値を設定する。
 
-这就是今天新增的控制条件。
-
-```sql
-SELECT COUNT(*) AS cnt
-FROM control_table
-WHERE kubun = 'prod_bq_available'
-  AND value = 'true';
+```
+UPDATE `一時BQデータセット名.テーブル名`
+SET cc_id_hashed_88 =
+    TO_BASE64(CAST(cc_id_hashed AS BYTES FORMAT 'HEX'))
+WHERE TRUE;
 ```
 
-判定条件：
+・cc_id_hashedの128桁の16進数文字列をBASE64形式の88桁文字列に変換する。
 
-* `cnt = 1`：利用可能
+・生成処理及び生成結果の検証が正常終了した後、④処理を正常完了とする。
 
-* `cnt = 0`：条件未成立
+・異常終了時はエラーログを登録し、⑤処理は実施しない。
 
-### 条件B：同テーブル事前1⑤完了
+・再実行時は完了済みのParquetロードを再実行せず、未完了の生成処理または検証処理から再開する。
 
-```sql
-SELECT COUNT(*) AS cnt
-FROM table_status_mng
-WHERE table_id = :table_id
-  AND mode = 'pre1'
-  AND status_step_5 = 'SUCCESS';
+### **4. ④处理流程图**
+
+\#chatgpt-mermaid-\_r_t4\_ :is(.node,.pele-node).info :is(rect,circle,ellipse,polygon,path):where(:not(.label \*)) {fill:#1d2e3e;stroke:#1a3957}#chatgpt-mermaid-\_r_t4\_ :is(.node,.pele-node).info [fill="none"]:where(:not(.label \*)) {fill:none}#chatgpt-mermaid-\_r_t4\_ :is(.node,.pele-node).info [stroke="none"]:where(:not(.label \*)) {stroke:none}#chatgpt-mermaid-\_r_t4\_ :is(.node,.pele-node).info :where(text,.label,.nodeLabel) {fill:#539af8;color:#539af8}#chatgpt-mermaid-\_r_t4\_ :is(.node,.pele-node).success :is(rect,circle,ellipse,polygon,path):where(:not(.label \*)) {fill:#1d3827;stroke:#194b2d}#chatgpt-mermaid-\_r_t4\_ :is(.node,.pele-node).success [fill="none"]:where(:not(.label \*)) {fill:none}#chatgpt-mermaid-\_r_t4\_ :is(.node,.pele-node).success [stroke="none"]:where(:not(.label \*)) {stroke:none}#chatgpt-mermaid-\_r_t4\_ :is(.node,.pele-node).success :where(text,.label,.nodeLabel) {fill:#53b559;color:#53b559}#chatgpt-mermaid-\_r_t4\_{font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";font-size:16px;fill:rgb(237, 237, 237);}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#chatgpt-mermaid-\_r_t4\_ .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#chatgpt-mermaid-\_r_t4\_ .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#chatgpt-mermaid-\_r_t4\_ .error-icon{fill:rgb(48, 48, 48);}#chatgpt-mermaid-\_r_t4\_ .error-text{fill:rgb(237, 237, 237);stroke:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_t4\_ .edge-thickness-normal{stroke-width:1px;}#chatgpt-mermaid-\_r_t4\_ .edge-thickness-thick{stroke-width:3.5px;}#chatgpt-mermaid-\_r_t4\_ .edge-pattern-solid{stroke-dasharray:0;}#chatgpt-mermaid-\_r_t4\_ .edge-thickness-invisible{stroke-width:0;fill:none;}#chatgpt-mermaid-\_r_t4\_ .edge-pattern-dashed{stroke-dasharray:3;}#chatgpt-mermaid-\_r_t4\_ .edge-pattern-dotted{stroke-dasharray:2;}#chatgpt-mermaid-\_r_t4\_ .marker{fill:rgb(175, 175, 175);stroke:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_t4\_ .marker.cross{stroke:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_t4\_ svg{font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";font-size:16px;}#chatgpt-mermaid-\_r_t4\_ p{margin:0;}#chatgpt-mermaid-\_r_t4\_ .label{font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";color:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_t4\_ .cluster-label text{fill:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_t4\_ .cluster-label span{color:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_t4\_ .cluster-label span p{background-color:transparent;}#chatgpt-mermaid-\_r_t4\_ .label text,#chatgpt-mermaid-\_r_t4\_ span{fill:rgb(237, 237, 237);color:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_t4\_ .node rect,#chatgpt-mermaid-\_r_t4\_ .node circle,#chatgpt-mermaid-\_r_t4\_ .node ellipse,#chatgpt-mermaid-\_r_t4\_ .node polygon,#chatgpt-mermaid-\_r_t4\_ .node path{fill:rgb(9, 23, 44);stroke:rgb(31, 78, 148);stroke-width:1px;}#chatgpt-mermaid-\_r_t4\_ .rough-node .label text,#chatgpt-mermaid-\_r_t4\_ .node .label text,#chatgpt-mermaid-\_r_t4\_ .image-shape .label,#chatgpt-mermaid-\_r_t4\_ .icon-shape .label{text-anchor:middle;}#chatgpt-mermaid-\_r_t4\_ .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#chatgpt-mermaid-\_r_t4\_ .rough-node .label,#chatgpt-mermaid-\_r_t4\_ .node .label,#chatgpt-mermaid-\_r_t4\_ .image-shape .label,#chatgpt-mermaid-\_r_t4\_ .icon-shape .label{text-align:center;}#chatgpt-mermaid-\_r_t4\_ .node.clickable{cursor:pointer;}#chatgpt-mermaid-\_r_t4\_ .root .anchor path{fill:rgb(175, 175, 175)!important;stroke-width:0;stroke:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_t4\_ .arrowheadPath{fill:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_t4\_ .edgePath .path{stroke:rgb(175, 175, 175);stroke-width:1px;}#chatgpt-mermaid-\_r_t4\_ .flowchart-link{stroke:rgb(175, 175, 175);fill:none;}#chatgpt-mermaid-\_r_t4\_ .edgeLabel{background-color:rgb(0, 0, 0);text-align:center;}#chatgpt-mermaid-\_r_t4\_ .edgeLabel p{background-color:rgb(0, 0, 0);}#chatgpt-mermaid-\_r_t4\_ .edgeLabel rect{opacity:0.5;background-color:rgb(0, 0, 0);fill:rgb(0, 0, 0);}#chatgpt-mermaid-\_r_t4\_ .labelBkg{background-color:rgba(0, 0, 0, 0.5);}#chatgpt-mermaid-\_r_t4\_ .cluster rect{fill:rgb(48, 48, 48);stroke:rgba(255, 255, 255, 0.15);stroke-width:1px;}#chatgpt-mermaid-\_r_t4\_ .cluster text{fill:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_t4\_ .cluster span{color:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_t4\_ div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";font-size:12px;background:rgb(48, 48, 48);border:1px solid rgba(255, 255, 255, 0.15);border-radius:2px;pointer-events:none;z-index:100;}#chatgpt-mermaid-\_r_t4\_ .flowchartTitleText{text-anchor:middle;font-size:18px;fill:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_t4\_ rect.text{fill:none;stroke-width:0;}#chatgpt-mermaid-\_r_t4\_ .icon-shape,#chatgpt-mermaid-\_r_t4\_ .image-shape{background-color:rgb(0, 0, 0);text-align:center;}#chatgpt-mermaid-\_r_t4\_ .icon-shape p,#chatgpt-mermaid-\_r_t4\_ .image-shape p{background-color:rgb(0, 0, 0);padding:2px;}#chatgpt-mermaid-\_r_t4\_ .icon-shape .label rect,#chatgpt-mermaid-\_r_t4\_ .image-shape .label rect{opacity:0.5;background-color:rgb(0, 0, 0);fill:rgb(0, 0, 0);}#chatgpt-mermaid-\_r_t4\_ .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#chatgpt-mermaid-\_r_t4\_ .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#chatgpt-mermaid-\_r_t4\_ .node .neo-node{stroke:rgb(31, 78, 148);}#chatgpt-mermaid-\_r_t4\_ [data-look="neo"].node rect,#chatgpt-mermaid-\_r_t4\_ [data-look="neo"].cluster rect,#chatgpt-mermaid-\_r_t4\_ [data-look="neo"].node polygon{stroke:url(#chatgpt-mermaid-\_r_t4\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_t4\_ [data-look="neo"].swimlane.cluster rect{filter:none;}#chatgpt-mermaid-\_r_t4\_ [data-look="neo"].node path{stroke:url(#chatgpt-mermaid-\_r_t4\_-gradient);stroke-width:1px;}#chatgpt-mermaid-\_r_t4\_ [data-look="neo"].node .outer-path{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_t4\_ [data-look="neo"].node .neo-line path{stroke:rgb(31, 78, 148);filter:none;}#chatgpt-mermaid-\_r_t4\_ [data-look="neo"].node circle{stroke:url(#chatgpt-mermaid-\_r_t4\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_t4\_ [data-look="neo"].node circle .state-start{fill:#000000;}#chatgpt-mermaid-\_r_t4\_ [data-look="neo"].icon-shape .icon{fill:url(#chatgpt-mermaid-\_r_t4\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_t4\_ [data-look="neo"].icon-shape .icon-neo path{stroke:url(#chatgpt-mermaid-\_r_t4\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_t4\_ .node text{font-size:14px;font-weight:600;letter-spacing:normal;fill:rgb(153, 206, 255);}#chatgpt-mermaid-\_r_t4\_ .edgeLabels text{font-size:13px;font-weight:600;letter-spacing:-0.08px;fill:rgb(153, 206, 255);}#chatgpt-mermaid-\_r_t4\_ .node tspan[font-weight="normal"],#chatgpt-mermaid-\_r_t4\_ .edgeLabels tspan[font-weight="normal"]{font-weight:600;}#chatgpt-mermaid-\_r_t4\_ .edgeLabel .label rect{opacity:1;rx:13px;ry:13px;fill:rgb(0, 14, 26);stroke:rgb(26, 62, 95);stroke-width:1px;}#chatgpt-mermaid-\_r_t4\_ .node rect,#chatgpt-mermaid-\_r_t4\_ .node circle,#chatgpt-mermaid-\_r_t4\_ .node ellipse,#chatgpt-mermaid-\_r_t4\_ .node polygon,#chatgpt-mermaid-\_r_t4\_ .node path{fill:rgb(0, 40, 77);stroke:rgba(255, 255, 255, 0.1);stroke-width:1px;}#chatgpt-mermaid-\_r_t4\_ .node rect{rx:16px;ry:16px;}#chatgpt-mermaid-\_r_t4\_ .mermaid-decision .label-container{fill:rgb(0, 14, 26);stroke:rgb(26, 62, 95);stroke-dasharray:2,2;}#chatgpt-mermaid-\_r_t4\_ .edgePaths .flowchart-link{stroke:rgb(175, 175, 175);stroke-width:1px;stroke-linecap:round;stroke-linejoin:round;}#chatgpt-mermaid-\_r_t4\_ .marker{fill:rgb(175, 175, 175);stroke:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_t4\_ :root{--mermaid-font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";}事前準備一時BQテーブル作成④ ParquetロードWRITE_APPEND全ファイルロード完了件数検証hash_tbl_flg = '1'？cc_id_hashed_88生成UPDATE生成結果検証④正常完了異常終了⑤正式TBLロードYesOKNGNo
+
+这样现有④的流程基本不用大改，只需要在事前准备中增加表定义，并在件数检证成功之后加入UPDATE处理。
+
+## **二、方式③的简单实验**
+
+建议先使用2条测试数据，实际确认Parquet中不存在Hash88列的情况下，能否正常Load到提前创建的4列表中。
+
+### **STEP 1：生成测试Parquet文件**
+
+使用Python生成一个只有3个项目的Parquet文件。
+
+```
+import pyarrow as paimport pyarrow.parquet as pqtable = pa.table({    "cc_id": ["001", "002"],    "cc_id_hashed": ["ab" * 64, "cd" * 64],    "member_rank": ["A", "B"]})pq.write_table(table, "hash88_test.parquet")
 ```
 
-`cnt = 1` 时，表示同一张表的事前1⑤处理已完成。
+这里的Hash128都是模拟数据，不涉及实际会员信息。
 
-### 条件C：同テーブル事前2⑤完了
+### **STEP 2：提前创建一时BQ表**
 
-```sql
-SELECT COUNT(*) AS cnt
-FROM table_status_mng
-WHERE table_id = :table_id
-  AND mode = 'pre2'
-  AND status_step_5 = 'SUCCESS';
+```
+CREATE TABLE `hash88_test.cc_master_test` (
+    cc_id STRING,
+    cc_id_hashed STRING,
+    cc_id_hashed_88 STRING,
+    member_rank STRING
+);
 ```
 
-`cnt = 1` 时，表示同一张表的事前2⑤处理已完成。
+`hash88_test` Dataset需要提前存在。
 
-### 条件D：lp_cc_info当日④完了
+特意把Hash88放在第三列，用来确认列顺序不同是否也可以正常Load。
 
-```sql
-SELECT COUNT(*) AS cnt
-FROM table_status_mng
-WHERE table_id = 'lp_cc_info'
-  AND mode = 'main'
-  AND status_step_4 = 'SUCCESS';
+### **STEP 3：执行Load**
+
+```
+bq load \
+  --source_format=PARQUET \
+  --noreplace \
+  hash88_test.cc_master_test \
+  ./hash88_test.parquet
 ```
 
-`cnt = 1` 时，表示退会会员除外处理所需要的 `lp_cc_info` 已经导入当日一时BQ。
+预期结果：
 
-### 3\. 8种情况对应的SQL组合
+| cc_id | cc_id_hashed | cc_id_hashed_88 | member_rank |
+| ----- | ------------ | --------------- | ----------- |
+| 001   | ababab...    | NULL            | A           |
+| 002   | cdcdcd...    | NULL            | B           |
 
-通过上面的4种SQL，就可以实现以下全部条件。
+官方资料说明，Parquet文件中缺少的列会使用目标表的默认值。对于本例的NULLABLE列，预期为NULL。
 
-| SEQ | 処理モード | 退会会員対象 | 判定条件          |
-| --- | ----- | ------ | ------------- |
-| 1   | 事前1   | 対象     | A AND D       |
-| 2   | 事前1   | 対象外    | A             |
-| 3   | 事前2   | 対象     | B AND D       |
-| 4   | 事前2   | 対象外    | B             |
-| 5   | 当日    | 対象     | B AND C AND D |
-| 6   | 当日    | 対象外    | B AND C       |
-| 7   | 事後    | 対象     | 無条件           |
-| 8   | 事後    | 対象外    | 無条件           |
+[image](https://www.google.com/s2/favicons?domain=https://docs.cloud.google.com\&sz=32)
 
-例如SEQ 1，可以合成一条SQL：
+Google Cloud Documentation
 
-```sql
-SELECT CASE
-    WHEN EXISTS (
-        SELECT 1
-        FROM control_table
-        WHERE kubun = 'prod_bq_available'
-          AND value = 'true'
+
+
+### **STEP 4：执行Hash88生成**
+
+```
+UPDATE `hash88_test.cc_master_test`
+SET cc_id_hashed_88 =
+    TO_BASE64(
+        CAST(cc_id_hashed AS BYTES FORMAT 'HEX')
     )
-    AND EXISTS (
-        SELECT 1
-        FROM table_status_mng
-        WHERE table_id = 'lp_cc_info'
-          AND mode = 'main'
-          AND status_step_4 = 'SUCCESS'
-    )
-    THEN 1
-    ELSE 0
-END AS executable;
+WHERE TRUE;
 ```
 
-返回 `1` 就可以通过本次条件判断，返回 `0` 就继续等待。
+### **STEP 5：确认结果**
 
-不过从共通化和今后维护的角度，我更推荐前面的4个SQL分别共通化，然后由Python组合判断。
-
-### 4\. ⑤处理条件判断流程
-
-```mermaid
-flowchart TD
-    A["⑤正式TBLロード実施判定"] --> B{"停止制御確認"}
-    B -->|新規起動停止| X["新規起動しない"]
-    B -->|新規起動可| C{"対象テーブルの④完了確認"}
-    C -->|未完了| W["実施保留"]
-    C -->|完了| D["処理モード・退会会員対象区分取得"]
-    D --> E["該当する⑤処理条件の判定<br/>SEQ1～8"]
-    E --> F{"全条件成立？"}
-    F -->|No| W
-    F -->|Yes| G["⑤正式TBLロード実行"]
-    W --> H["次回ループ時に再判定"]
+```
+SELECT
+    cc_id,
+    LENGTH(cc_id_hashed) AS hash128_length,
+    LENGTH(cc_id_hashed_88) AS hash88_length,
+    cc_id_hashed_88,
+    member_rank
+FROM `hash88_test.cc_master_test`;
 ```
 
-注意，这里还有两个共通条件：
+预期结果：
 
-* 停止制御：`stop_flag = 'false'`
+| cc_id | hash128_length | hash88_length | member_rank |
+| ----- | -------------- | ------------- | ----------- |
+| 001   | 128            | 88            | A           |
+| 002   | 128            | 88            | B           |
 
-* 当前迁移对象自身的④处理已经完成。
+这5步全部成功，就可以初步证明方式③可行。
 
-这两个条件即使是事后模式也需要判断。上面SEQ7、8的「無条件」只是指没有额外的依赖条件。
+## **三、三个方式的最新对比**
 
-### 5\. 模拟一下实际运行过程
+| 比较项目        | 方式①          | 方式②      | 方式③（本次追加）   |
+| ----------- | ------------ | -------- | ----------- |
+| 实现方式        | ALTER＋UPDATE | SELECT加工 | 事前建表＋UPDATE |
+| 一时表数量       | 1            | 2        | 1           |
+| 提前建表        | 不需要          | 可选       | 需要          |
+| ALTER TABLE | 需要           | 不需要      | 不需要         |
+| 列顺序控制       | ×            | ○        | ○           |
+| Hash88生成    | ○            | ○        | ○           |
+| 复杂项目转换      | △            | ○        | △           |
+| 设计复杂度       | 低            | 中        | 低           |
+| 推荐场景        | 自动建表         | 多种项目转换   | 单纯Hash88生成  |
 
-假设 `TABLE_A` 是退会会员对象表。
+客户提出的CRM同期、置换方案在新版资料中单独说明，因为它属于Master整体迁移方针，与Hash88生成的具体实现方式不是同一个层面的比较。
 
-| 时间       | 本番BQ利用可否 | lp_cc_info 当日④ | TABLE_A 事前1⑤ | TABLE_A 事前2⑤ | 执行结果   |
-| -------- | -------- | -------------- | ------------ | ------------ | ------ |
-| 事前1期间    | false    | 未完了            | 未完了          | 未完了          | 等待     |
-| 事前2期间    | true     | 未完了            | 未完了          | 未完了          | 等待     |
-| 当日 09:00 | true     | SUCCESS        | 未完了          | 未完了          | 执行事前1⑤ |
-| 当日 09:30 | true     | SUCCESS        | SUCCESS      | 未完了          | 执行事前2⑤ |
-| 当日 10:00 | true     | SUCCESS        | SUCCESS      | SUCCESS      | 执行当日⑤  |
+## **四、更新后的MD文件**
 
-这就实现了同事提出的依赖控制。
+**共通会員マスタ移行・Hash88生成方式の検討（改訂版）**
 
-### 6\. 还有三个地方需要确认
+日语 Markdown · 包含全部方案、设计反映文案及验证实验
 
-| 確認事項                | 确认原因                                      |
-| ------------------- | ----------------------------------------- |
-| 事前1、事前2的mode定义      | 原来的设计只有事前、当日、事后，需要确认是否已经区分                |
-| 某张表不存在事前1或事前2数据时的判断 | 避免因不存在状态记录而无限等待                           |
-| 本番BQ利用可否是否作为⑤的共通条件  | 原条件表只在SEQ1、2判断，如果之后变回false，是否也应该禁止其他模式执行⑤ |
+下载最新版 MD 文件
 
-另外，如果状态管理表保存多次迁移的记录，SQL还需要加入本次迁移的识别条件，避免读取上一次迁移的成功状态。
+文件中已经包含客户的同期置换方案、三种Hash88生成方式、详细对比、④⑤设计修改内容、SQL、Python、验证方法和官方参考资料。
 
-总体来说，你今天的DB修改是正确的。接下来可以开始修改⑤处理条件判断的设计了。 建议将4种基本SQL定义为共通处理，8种情况通过条件组合实现，这样以后即使客户再次修改迁移条件，也不需要大量修改程序。
+**目前推荐方式③，但尚未在实际BQ环境执行验证。** 另外，方式③虽然结构简单，但全量UPDATE的费用不一定比方式②低，后续还需要使用实际数据量测试性能。
+
+你现在可以先按照上面的日语文案修改Excel，Hash88生成部分实际上只需要一条UPDATE SQL。
